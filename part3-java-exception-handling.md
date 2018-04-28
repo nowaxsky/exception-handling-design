@@ -68,9 +68,253 @@ public static void main(String[] args) {
         }
         ``` 
 ## 2. Finally Block覆蓋問題
-* finally block丟出的例外會覆蓋掉try blcok和catch block所丟出的例外
+* finally block丟出的例外會覆蓋掉try blcok和catch block所丟出的例外, 如下例:
+    ```
+    public class Test {
 
-## 3. 物件導向語言的例外處理機制
+        public static void finallyException() throws IOException {
+            try {
+                throw new IOException();    
+            } finally {
+                try {
+                    throw new IOException();
+                } catch (IOException e) {
+                    throw e;
+                }
+            }
+        }
+    
+        public static void main(String[] args) {
+            try {
+                finallyException();
+            } catch (Exception e) {
+                e.printStackTrace();
+                Throwable [] t = e.getSuppressed();
+                System.err.println("suppressed exception size = " + t.length);
+            }
+        }
+    }    
+    ```
+* 執行結果如下(第12行是第二個IOException):
+    ```
+    java.io.IOException
+        at org.cpm.zwl.util.Test.finallyException(Test.java:12)
+        at org.cpm.zwl.util.Test.main(Test.java:21)
+    suppressed exception size = 0
+    ```
+* 兩個IOException代表的錯誤意義:
+    1. 功能失效(function failure): 可以retry, 或考慮呼叫其他函數來取代失敗的函數, 如果是design fault則需要修改程式
+    1. 清理失效(cleanup failure): 資源釋放失敗, 一般為design fault, 需要修改程式
+* 實務上, 會保留function failure(第一個錯誤), 因為cleanup failure(第二個錯誤)發生的機率比較低, 且就算發生系統依然能再執行一陣子(如果沒有釋放記憶體也不會立刻導致系統問題), 所以在finally產生例外的話, 需要把例外記錄到log中
+* 但是理想上2個錯誤都應該要保留, 而且在Java SE7之後支援try-with-resources, 因為沒有finally block, 也無法保存錯誤. 解決方法為suppressed exception, 請參考下一節
 
-## 4. 例外處理vs容錯設計
+## 3. Suppressed Exception
+* Java SE7在Throwable中加入了getSuppressed()來取得suppressed exception, 範例如下:
+    ```
+    public class MyOutputStream implements AutoCloseable {
+
+        @Override
+        public void close() throws Exception {
+            throw new IOException();    
+        }
+
+    }
+
+    public class Test {
+
+        public static void tryWithResource() throws Exception {
+
+            try(MyOutputStream mos = new MyOutputStream()) {
+                throw new IOException("Function failure");
+            } 
+        }
+    
+        public static void main(String[] args) {
+            try {
+                tryWithResource();
+            } catch (Exception e) {
+                e.printStackTrace();
+                Throwable [] t = e.getSuppressed();
+                System.err.println("suppressed exception size = " + t.length);
+            }
+        }
+    }
+    ```
+* 執行的結果如下:
+    ```
+    java.io.IOException: Function failure
+        at org.cpm.zwl.util.Test.tryWithResource(Test.java:10)
+        at org.cpm.zwl.util.Test.main(Test.java:16)
+        Suppressed: java.io.IOException
+            at org.cpm.zwl.util.MyOutputStream.close(MyOutputStream.java:9)
+            at org.cpm.zwl.util.Test.tryWithResource(Test.java:11)
+            ... 1 more
+    suppressed exception size = 1
+    ```
+* 由執行結果可以得知, main(呼叫者)所捕捉到的例外是tryWithResource所丟出來的IOException(即function failure), 在close中所丟出的IOException(cleanup failure)變成了第一個錯誤的suppressed exception
+* **總結: 在使用try-with-resources時丟出的例外是function failure, 若function failure附帶suppressed exception, 則表示還發生cleanup failure**
+* 若是沒有任何的function failure, 只有cleanup failure, 則suppressed exception不會出現(嘗試把上面的例子中, try裡面的```throw new IOException("Function failure");```這行刪掉), 或者其他suppressed exception中(依堆疊順序反向出現), 如下例:
+    ```
+    public class MyConnection implements AutoCloseable {
+
+        @Override
+        public void close() throws Exception {
+            throw new SQLException();
+        }
+    }
+
+    public class MyInputStream implements AutoCloseable {
+
+        @Override
+        public void close() throws Exception {
+            throw new FileNotFoundException();
+        }
+    }
+
+    public class Test {
+
+        public static void tryWithResource() throws Exception {
+
+            try (MyOutputStream mos = new MyOutputStream();
+                MyConnection mc = new MyConnection();
+                MyInputStream mis = new MyInputStream()) {
+            }
+        }
+
+        public static void main(String[] args) {
+            try {
+                tryWithResource();
+            } catch (Exception e) {
+                e.printStackTrace();
+                Throwable[] t = e.getSuppressed();
+                System.err.println("suppressed exception size = " + t.length);
+            }
+        }
+    }
+    ```
+* 執行後, 由於MyInputStream最先關閉所以先拋出FileNotFoundException, 接著依序為MyConnection和MyOutputStream, 形成的例外結構為最先出現的錯誤會顯示, suppressed exception依序為SQLException和IOException, 結果如下:
+    ```
+    java.io.FileNotFoundException
+        at org.cpm.zwl.util.MyInputStream.close(MyInputStream.java:9)
+        at org.cpm.zwl.util.Test.tryWithResource(Test.java:10)
+        at org.cpm.zwl.util.Test.main(Test.java:15)
+        Suppressed: java.sql.SQLException
+            at org.cpm.zwl.util.MyConnection.close(MyConnection.java:9)
+            ... 2 more
+        Suppressed: java.io.IOException
+            at org.cpm.zwl.util.MyOutputStream.close(MyOutputStream.java:9)
+            ... 2 more
+    suppressed exception size = 2
+    ```
+* 由上面的例子可以知道例外的結構有多種可能, 有可能全部是cleanup failure, 也有可能是1個function failure, 其他是cleanup failure, 若只出現一個exception甚至也無法判斷是cleanup failure還是function failure, 所以我們需要更清楚的例外類別設計
+
+## 4. 清楚的Cleanup Failure語意
+* 要有清楚的cleanup failure, 作者建議自行定義CleanupException用來代表cleanup failure:
+    ```
+    public class CleanupException extends RuntimeException {
+
+        public CleanupException(Exception e) {
+            super(e);
+        }
+    }
+    ```
+* 繼承自RuntimeException(是一個unchecked exception)的理由:
+    1. 任何釋放資源的地方都有可能丟出CleanupException, 如果設計成checked exception則每次都要處理這個較次要的錯誤, 反而容易導致例外反射性地被忽略而下降系統強健度
+    1. 發生cleanup failure的機率其實不高, 若是真的發生再將這個例外交由系統最上層寫入log, 或立即顯示讓使用者得知
+* 修正cleanup failure(實作AutoCloseable)相關的類別, 使其接到錯誤後拋出CleanupException, 如下例:
+    ```
+    public class MyConnection implements AutoCloseable {
+
+        @Override
+        public void close() throws Exception {
+            try {
+                throw new SQLException();
+            } catch (Exception e) {
+                throw new CleanupException(e);
+            }
+        }
+    }
+    ```
+* 將MyInputStream和MyOutputStream都加入CleanupException後, 重新執行一次:
+    ```
+    org.cpm.zwl.util.CleanupException: java.io.FileNotFoundException
+        at org.cpm.zwl.util.MyInputStream.close(MyInputStream.java:12)
+        at org.cpm.zwl.util.Test.tryWithResource(Test.java:13)
+        at org.cpm.zwl.util.Test.main(Test.java:18)
+        Suppressed: org.cpm.zwl.util.CleanupException: java.sql.SQLException
+            at org.cpm.zwl.util.MyConnection.close(MyConnection.java:12)
+            ... 2 more
+        Caused by: java.sql.SQLException
+            at org.cpm.zwl.util.MyConnection.close(MyConnection.java:10)
+            ... 2 more
+        Suppressed: org.cpm.zwl.util.CleanupException: java.io.IOException
+            at org.cpm.zwl.util.MyOutputStream.close(MyOutputStream.java:12)
+            ... 2 more
+        Caused by: java.io.IOException
+            at org.cpm.zwl.util.MyOutputStream.close(MyOutputStream.java:10)
+            ... 2 more
+    Caused by: java.io.FileNotFoundException
+        at org.cpm.zwl.util.MyInputStream.close(MyInputStream.java:10)
+        ... 2 more
+    suppressed exception size = 2
+    ```
+* 如果在try中加入function failure:
+    ```
+    public class Test {
+
+        public static void tryWithResource() throws Exception {
+
+            try (MyOutputStream mos = new MyOutputStream();
+                MyConnection mc = new MyConnection();
+                MyInputStream mis = new MyInputStream()) {
+                
+                // add this line
+                throw new IOException();
+            }
+        }
+
+        public static void main(String[] args) {
+            try {
+                tryWithResource();
+            } catch (Exception e) {
+                e.printStackTrace();
+                Throwable[] t = e.getSuppressed();
+                System.err.println("suppressed exception size = " + t.length);
+            }
+        }
+    }
+    ```
+* 結果如下:
+    ```
+    java.io.IOException
+        at org.cpm.zwl.util.Test.tryWithResource(Test.java:12)
+        at org.cpm.zwl.util.Test.main(Test.java:18)
+        Suppressed: org.cpm.zwl.util.CleanupException: java.io.FileNotFoundException
+            at org.cpm.zwl.util.MyInputStream.close(MyInputStream.java:12)
+            at org.cpm.zwl.util.Test.tryWithResource(Test.java:13)
+            ... 1 more
+        Caused by: java.io.FileNotFoundException
+            at org.cpm.zwl.util.MyInputStream.close(MyInputStream.java:10)
+            ... 2 more
+        Suppressed: org.cpm.zwl.util.CleanupException: java.sql.SQLException
+            at org.cpm.zwl.util.MyConnection.close(MyConnection.java:12)
+            at org.cpm.zwl.util.Test.tryWithResource(Test.java:13)
+            ... 1 more
+        Caused by: java.sql.SQLException
+            at org.cpm.zwl.util.MyConnection.close(MyConnection.java:10)
+            ... 2 more
+        Suppressed: org.cpm.zwl.util.CleanupException: java.io.IOException
+            at org.cpm.zwl.util.MyOutputStream.close(MyOutputStream.java:12)
+            at org.cpm.zwl.util.Test.tryWithResource(Test.java:13)
+            ... 1 more
+        Caused by: java.io.IOException
+            at org.cpm.zwl.util.MyOutputStream.close(MyOutputStream.java:10)
+            ... 2 more
+    suppressed exception size = 3
+    ```
+* 如此我們可以清楚區分是function failure或是cleanup failure了, 但還有2點問題待改善:
+    1. 在實作AutoCloseable類別時, close方法只能拋出Exception, 不能拋出CleanupException
+    1. 使用try-with-resources時JVM會幫忙產生suppressed exception, 但傳統finally寫法卻不會, 依然發生finally拋出的例外覆蓋掉try或catch例外的狀況
+
+## 5.自行製作Suppressed Exception
 
