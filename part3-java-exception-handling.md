@@ -317,4 +317,153 @@ public static void main(String[] args) {
     1. 使用try-with-resources時JVM會幫忙產生suppressed exception, 但傳統finally寫法卻不會, 依然發生finally拋出的例外覆蓋掉try或catch例外的狀況
 
 ## 5.自行製作Suppressed Exception
+* 本節主要解決不能拋出CleanupException和不使用try-with-resources時的覆蓋問題
+* 先將MyInputStream, MyConnection, 和MyOutputStream改成只拋出原來的例外FileNotFoundException, SQLException, IOException, 這邊的目的是模擬Java內建的資源物件
+* 設計一個Cleaner類別如下:
+    ```
+    public class Cleaner {
 
+        private Stack<AutoCloseable> stack;
+        private Throwable leadException;
+        private CleanupException outgoingCleanupException;
+
+        private Cleaner() {
+            this.stack = new Stack<>();
+            this.leadException = null;
+            this.outgoingCleanupException = null;
+        }
+
+        static public Cleaner newInstance() {
+            return new Cleaner();
+        }
+
+        public <T extends AutoCloseable> T push(T obj) {
+            return (T) stack.push(obj);
+        }
+
+        public void setLeadException(Throwable lead) {
+            this.leadException = lead;
+        }
+
+        public void clear() {
+            while (!stack.isEmpty()) {
+                AutoCloseable auto = stack.pop();
+                try {
+                    if (null != auto) auto.close();
+                } catch (Exception e) {
+                    if (hasLeadException()) {
+                        leadException.addSuppressed(new CleanupException(e));
+                    } else if (!hasOutgoingCleanupException()) {
+                        outgoingCleanupException = new CleanupException(e);
+                    } else {
+                        outgoingCleanupException.addSuppressed(new CleanupException(e));
+                    }
+                }
+            }
+            if (hasOutgoingCleanupException()) throw outgoingCleanupException;
+        }
+
+        public boolean hasLeadException() {
+            return (null != leadException) ? true : false;
+        }
+
+        public boolean hasOutgoingCleanupException() {
+            return (null != outgoingCleanupException) ? true : false;
+        }
+
+    }
+
+    ```
+* 接著使用finally來顯示上節的範例:
+    ```
+    public class Test {
+
+        public static void failureException() throws Exception {
+
+            MyOutputStream mos = null;
+            MyConnection mc = null;
+            MyInputStream mis = null;
+            Cleaner cln = Cleaner.newInstance();
+            try {
+                mos = cln.push(new MyOutputStream());
+                mc = cln.push(new MyConnection());
+                mis = cln.push(new MyInputStream());
+                throw new IOException("Function failure");
+            } catch (Exception e) {
+                cln.setLeadException(e);
+                throw e;
+            } finally {
+                cln.clear();
+            }
+
+        }
+
+        public static void main(String[] args) {
+            try {
+                failureException();
+            } catch (Exception e) {
+                e.printStackTrace();
+                Throwable[] t = e.getSuppressed();
+                System.err.println("suppressed exception size = " + t.length);
+            }
+        }
+    }
+    ```
+* 這邊的做法就是模擬try-with-resources, 先將類別放入Cleaner中, 若在try中發生錯誤, 則會進入自定義的leadException裡(即function failure), 接著cleanup failure會是leadException的suppressed exception, 若try中並未發生錯誤, 則第一個cleanup failure會成為自定義的outgoingCleanupException, 接著其他cleanup failure會是outgoingCleanupException的suppressed exception, 執行結果如下:
+    ```
+    java.io.IOException: Function failure
+        at org.cpm.zwl.util.Test.failureException(Test.java:17)
+        at org.cpm.zwl.util.Test.main(Test.java:29)
+        Suppressed: org.cpm.zwl.util.CleanupException: java.io.FileNotFoundException
+            at org.cpm.zwl.util.Cleaner.clear(Cleaner.java:37)
+            at org.cpm.zwl.util.Test.failureException(Test.java:22)
+            ... 1 more
+        Caused by: java.io.FileNotFoundException
+            at org.cpm.zwl.util.MyInputStream.close(MyInputStream.java:9)
+            at org.cpm.zwl.util.Cleaner.clear(Cleaner.java:34)
+            ... 2 more
+        Suppressed: org.cpm.zwl.util.CleanupException: java.sql.SQLException
+            at org.cpm.zwl.util.Cleaner.clear(Cleaner.java:37)
+            at org.cpm.zwl.util.Test.failureException(Test.java:22)
+            ... 1 more
+        Caused by: java.sql.SQLException
+            at org.cpm.zwl.util.MyConnection.close(MyConnection.java:9)
+            at org.cpm.zwl.util.Cleaner.clear(Cleaner.java:34)
+            ... 2 more
+        Suppressed: org.cpm.zwl.util.CleanupException: java.io.IOException
+            at org.cpm.zwl.util.Cleaner.clear(Cleaner.java:37)
+            at org.cpm.zwl.util.Test.failureException(Test.java:22)
+            ... 1 more
+        Caused by: java.io.IOException
+            at org.cpm.zwl.util.MyOutputStream.close(MyOutputStream.java:9)
+            at org.cpm.zwl.util.Cleaner.clear(Cleaner.java:34)
+            ... 2 more
+    suppressed exception size = 3
+    ```
+* 將try中的例外拿掉結果如下:
+    ```
+    org.cpm.zwl.util.CleanupException: java.io.FileNotFoundException
+        at org.cpm.zwl.util.Cleaner.clear(Cleaner.java:39)
+        at org.cpm.zwl.util.Test.failureException(Test.java:22)
+        at org.cpm.zwl.util.Test.main(Test.java:29)
+        Suppressed: org.cpm.zwl.util.CleanupException: java.sql.SQLException
+            at org.cpm.zwl.util.Cleaner.clear(Cleaner.java:41)
+            ... 2 more
+        Caused by: java.sql.SQLException
+            at org.cpm.zwl.util.MyConnection.close(MyConnection.java:9)
+            at org.cpm.zwl.util.Cleaner.clear(Cleaner.java:34)
+            ... 2 more
+        Suppressed: org.cpm.zwl.util.CleanupException: java.io.IOException
+            at org.cpm.zwl.util.Cleaner.clear(Cleaner.java:41)
+            ... 2 more
+        Caused by: java.io.IOException
+            at org.cpm.zwl.util.MyOutputStream.close(MyOutputStream.java:9)
+            at org.cpm.zwl.util.Cleaner.clear(Cleaner.java:34)
+            ... 2 more
+    Caused by: java.io.FileNotFoundException
+        at org.cpm.zwl.util.MyInputStream.close(MyInputStream.java:9)
+        at org.cpm.zwl.util.Cleaner.clear(Cleaner.java:34)
+        ... 2 more
+    suppressed exception size = 2
+    ```
+## 6. Try, Catch, Finally的責任分擔
