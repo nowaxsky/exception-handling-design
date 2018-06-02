@@ -467,3 +467,36 @@ public static void main(String[] args) {
     suppressed exception size = 2
     ```
 ## 6. Try, Catch, Finally的責任分擔
+* Try block:
+    * 實作需求與替代方案(替代方案不應該出現在catch block)
+    * 製作check point: 為狀態回復做準備, 如JDBC中的setAutoCommit(false)
+    * 回報函數失敗: 
+        ```
+        try {
+            ...
+            if(value < 0) {
+                throw new Exception();
+            }
+            ...
+        } catch {
+            ...
+        }
+        ```
+* Catch block:
+    * 錯誤處理與缺陷處理
+    * 回報錯誤狀況(log)
+    * 控制重試流程
+* Finally block:
+    * 釋放資源並回報狀況(log)
+    * 若有設置check point, 需要在此丟棄不再使用的檢查點資源
+## 7. Checked vs Unchecked
+* Checked exception: 本質上代表可以被回復的狀況
+* Unchecked exception: 代表程式錯誤, 理論上不應該在程式中去處理它, 應該在主程式中捕捉並且回報給使用者, 最後再回報給開發人員協助後續除錯工作
+## 8. 介面演進
+* 介面演進: 當函數丟出的checked exception的數目或是型別改變時, 函數的介面也會跟著改變, 則使用該函數的呼叫者也需要改變
+* 介面演進不可避免: 採用checked exception看似可以不用改變介面, 但這種作法是錯誤的, 因為unchecked exception本身的意思為程式錯誤, 並不可以當成可被回復的checked exception, 故使用checked exception只是在編譯時期方便(不用去處理), 但實際上在產生例外時, 沒有被正確的處理. 既然介面演進不可避免, 則在設計時應該注意一些原則以降低介面演進時的傷害
+* Folwer設計介面4原則:
+    1. 區分公開介面與發佈介面: 程式互動所需則設計成公開介面, 若已經成熟可以被外部使用者呼叫則使用發布介面, 如Eclipse中放在internal package裡的類別屬於尚未發布的介面
+    1. 重構非發布介面: 若遵循第一點, 則可以自由地重構非發布介面
+    1. 謹慎宣告發布介面
+    1. 不要改變發布介面: 發布出來的介面不能修改, 但可以有其他版本
